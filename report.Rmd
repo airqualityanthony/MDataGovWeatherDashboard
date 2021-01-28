@@ -1,0 +1,84 @@
+---
+title: "Weather Report"
+date: "18/01/2021"
+output: word_document
+always_allow_html: true
+params:
+  chosen_data: chosen_data
+  summary_data: data
+  hutton_data: data_hutton
+  hutton_month: hutton_month
+  sites: list
+  chosen_sites: sites
+  chosen_variable: input$weather
+  chosen_aggregation: input$aggregation
+  chosen_x_axis: input$x_axis
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(knitr)
+library(reactable)
+
+sites <- params$sites
+name <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sept","Oct","Nov","Dec")
+month <- c("1","2","3","4","5","6","7","8","9","10","11","12")
+
+month_names <- data.frame(name,month)
+
+
+```
+
+## Chosen Sites
+
+```{r echo=FALSE}
+
+site_names <- sites$Site_Name[sites$Site_ID %in% params$chosen_sites]
+
+
+print(site_names)
+
+
+```
+
+## Summary Table
+
+```{r echo=FALSE}
+
+kable(params$summary_data, caption = "Summary of Last 7 Days")
+
+```
+
+## Hutton Criteria Table
+
+```{r echo=FALSE}
+
+month_name <- month_names$name[month_names$month == params$hutton_month]
+
+kable(params$hutton_data,caption = paste0("Chosen month = ",month_name))
+
+
+```
+
+## Plots
+
+Chosen Aggregation plot:
+
+```{r eval = TRUE, echo=FALSE}
+## create plot dependent of x-axis selection - if calendar date then line graph.
+    
+ggplot(params$chosen_data) + 
+    geom_point(alpha = 0.4, aes(date, !!as.name(params$chosen_variable), color = params$chosen_data$Site_Name)) +   guides(color=guide_legend(title = "Met Site")) + ggtitle(paste0(params$chosen_variable,"(",params$chosen_aggregation,")")) + theme(plot.title = element_text(face = "bold")) + xlab(params$chosen_x_axis)
+
+
+  
+```
+
+Summary plot:
+
+```{r echo=FALSE}
+ggplot(params$summary_data) + 
+    geom_line(alpha = 0.4, aes(date, !!as.name(params$chosen_variable[1]), color = params$summary_data$Site_Name)) +   guides(color=guide_legend(title = "Met Site"))
+
+```

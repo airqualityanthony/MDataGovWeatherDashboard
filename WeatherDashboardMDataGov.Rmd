@@ -1,0 +1,444 @@
+---
+title: "UK Weather Dashboard - For MDataGov"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    theme: simplex
+---
+
+```{r setup, include=FALSE}
+
+## App also found working at https://anthony-walker.shinyapps.io/WeatherDashboardMDataGov/
+
+library(shiny)
+## dashboard shiny framework
+library(flexdashboard)
+## data manipulation
+library(tidyverse)
+## openair package has some good averaging functionality for time series -timeAverage()
+library(openair)
+## leaflet for mapping
+library(leaflet)
+library(viridis)
+## rmarkdown for report output
+library(rmarkdown)
+library(knitr)
+## lubridate for data formatting
+library(lubridate)
+library(reactable)
+library(formattable)
+library(htmltools)
+
+## DATA 
+# unzip the data to working directory as "./Data/"
+unzip("Data.zip")
+# read in the meta data on sites
+sites <- read.csv("Data/Sites.csv")
+# pull site codes from the sites meta data
+sitecodes <- sites$Site_ID
+# pull site names from the sites meta data
+sitenames <- sites$Site_Name
+
+
+## INPUT LOOKUPS
+# set names of sitecodes to the site names for input drop down.
+names(sitecodes) <- sitenames
+# set weather variables options
+weather_variables <- c("wind_speed","air_temperature","rltv_hum","visibility")
+# set aggregation options
+aggregation <- c("Raw hourly","Daily Avg", "Monthly Avg", "Daily Maxima","Daily Minima")
+# set x-axis option
+x_axis <- c("Calendar date","day of week","hour of day","hour of week")
+# day of months
+months <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sept","Oct","Nov","Dec")
+# numeric day to subset data
+month <- c("1","2","3","4","5","6","7","8","9","10","11","12")
+# set names of months for visual output.
+names(month) <- months
+
+
+
+### IMPORTANT - Aggregations and X-Axis choices are not constrained by 'sensible' combinations as this is not a requirement as per the project outline. This is left up to user choice. 
+
+## Weather data reactive - read in selected sites,clean, and join 
+sitedata <- reactive({
+  
+  ## create empty data frame to store data
+  data_out <- data.frame()
+
+  ## create chosen site variable based on input drop down
+  chosen_sites <- input$met_site
+
+  
+  ## for loop to read in only selected CSVs in chosen site
+  for(i in chosen_sites){
+  
+  data <- read.csv(paste0("Data/","Site_",i,".csv"))
+  data <- data %>% rename(Site_ID = Site)
+  data_out <- bind_rows(data_out,data)
+  }
+  data_out <- left_join(data_out,sites, by = "Site_ID")
+  
+  ## parse data time using lubridate to ensure the format is correct. 
+  data_out$date <- parse_date_time(data_out$ob_time, c("dmY HM","Ymd HMS"))
+  
+  ## add variable to describe numerical day of week 1-7
+  data_out$dayofweek <- wday(data_out$date)
+  
+  data_out$weekhour <- 24*data_out$dayofweek - (24 - data_out$hour)
+  
+  ## average datasets based on aggregation inputs.
+  if(input$aggregation == 'Raw hourly'){
+      return(data_out)
+  }
+  
+  if(input$aggregation == "Daily Avg"){
+    ## timeAverage from openair package - set avg.time averaging period, and group by type "Site_Name", default     statistical averaging is "mean"
+    data_out <- timeAverage(data_out,avg.time = "day",type = "Site_Name")
+    
+    return(data_out)
+  }
+    ## timeAverage to month avg.time period.
+    if(input$aggregation == "Monthly Avg"){
+    data_out <- timeAverage(data_out,avg.time = "month",type = "Site_Name")
+    
+    return(data_out)
+    }
+    ## time average to daily, and set statistic to "max"
+      if(input$aggregation == "Daily Maxima"){
+    data_out <- timeAverage(data_out,avg.time = "day",type = "Site_Name",statistic = "max")
+    
+    return(data_out)
+      }
+    ## time average to daily, and set statistic to "min"
+        if(input$aggregation == "Daily Minima"){
+    data_out <- timeAverage(data_out,avg.time = "day",type = "Site_Name",statistic = "min")
+    
+    return(data_out)
+  }
+  })
+
+## 7 day summary data reactive
+
+summarydata <- reactive({
+  
+  chosen_sites <- input$met_site
+  data_out <- data.frame()
+  
+  for(i in chosen_sites){
+  
+  data <- read.csv(paste0("Data/","Site_",i,".csv"))
+  data <- data %>% rename(Site_ID = Site)
+  data_out <- bind_rows(data_out,data)
+  }
+  data_out <- left_join(data_out,sites, by = "Site_ID")
+  
+  data_out$date <- parse_date_time(data_out$ob_time, c("dmY HM","Ymd HMS"))
+  
+  data_out <- timeAverage(data_out,avg.time = "day",type = "Site_Name")
+  
+  day_list <- unique(data_out$date)
+
+  seven_days <- day_list[(length(day_list)-6):length(day_list)]
+  
+  
+  seven_day_data <- filter(data_out,date %in% seven_days)
+  
+  
+  ## select only dates, site name and ID, and key weather variables
+  final <- select(seven_day_data,Site_Name,Site_ID,date,6:9)
+  
+  ## format date to friendly readable format dropping the time
+  final$date <- as.Date(final$date,format = "%Y-%m-%d")
+  
+  
+  ## format summary data to 2 decimal places
+  final$wind_speed <- formattable(final$wind_speed,digits = 2, format = "f")
+  ## formatting converts 0 to NA, convert back to 0
+  final$wind_speed[is.na(final$wind_speed)] <- 0
+  
+  final$air_temperature <- formattable(final$air_temperature,digits = 2, format = "f")
+  final$air_temperature[is.na(final$air_temperature)] <- 0
+  
+  final$rltv_hum <- formattable(final$rltv_hum,digits = 2, format = "f")
+  final$rltv_hum[is.na(final$rltv_hum)] <- 0
+  
+  final$visibility <- formattable(final$visibility,digits = 2, format = "f")
+  final$visibility[is.na(final$visibility)] <- 0
+  return(final)
+  
+})
+
+
+##### Hutton Criteria reactive dataset. 
+hutton_data <- reactive({
+  
+  chosen_sites <- input$met_site
+  data_out <- data.frame()
+  
+  for(i in chosen_sites){
+  
+  data <- read.csv(paste0("Data/","Site_",i,".csv"))
+  data <- data %>% rename(Site_ID = Site)
+  data_out <- bind_rows(data_out,data)
+  }
+  data_out <- left_join(data_out,sites, by = "Site_ID")
+  
+  data_out$date <- parse_date_time(data_out$ob_time, c("dmY HM","Ymd HMS"))
+  
+  ## set boolean variable for RH >= 90
+  data_out$RH_hutton <- ifelse(data_out$rltv_hum >= 90, TRUE,FALSE)
+  
+  ## average dataset to daily with statistic min to get minimum daily value for Hutton calculation
+  temp_min <- timeAverage(data_out,avg.time = "day",type = "Site_Name",statistic = "min")
+  
+  ## time average data_out set to daily - this sets the RH boolean to a mean value for the day.
+  daily <- timeAverage(data_out,avg.time = "day",type = "Site_Name")
+  
+  ## add min temp variable to daily dataset
+  daily$min_temp_hutton <- temp_min$air_temperature
+  
+  ## calculate hutton critera boolean - RH_hutton is a mean variable of hours in the day therefore 0.25 is 6 hours. 
+  daily$hutton_criteria <- ifelse(lag(daily$min_temp_hutton,1)>=10 & lag(daily$min_temp_hutton,2) >=10
+                                  & lag(daily$RH_hutton,1)>= 0.25 & lag(daily$RH_hutton,2) >= 0.25,yes = TRUE,FALSE)
+  
+  ## filter data by selected month of interest
+  data <- filter(daily,month==input$hutton_month)
+  
+  data$date <- as.Date(data$date,format = "%Y-%m-%d")
+  
+  data <- select(data,date,Site_ID,Site_Name,hutton_criteria)
+  
+  
+  ## IMPORTANT - for January the start date will be NA due to no previous data. Assume this is FALSE for hutton.
+  data$hutton_criteria[is.na(data$hutton_criteria)] <- FALSE
+  
+  return(data)
+  
+})
+
+## download data button
+output$downloadCSVButton = downloadHandler('data.csv', content = function(file) {
+    write.csv(summarydata(), file)
+  })
+
+## download handler - include params to push data to rmarkdown report. 
+output$downloadReportButton <- downloadHandler(
+    filename = "report.docx",
+    content = function(file) {
+        render("report.Rmd", output_format="word_document",
+              output_file=file,
+              params=list(chosen_data = sitedata(),
+                          summary_data=summarydata(),
+                          hutton_data=hutton_data(),
+                          hutton_month=input$hutton_month,
+                          sites=sites,
+                          chosen_sites=input$met_site,
+                          chosen_variable=input$weather_variable,
+                          chosen_aggregation=input$aggregation,
+                          chosen_x_axis=input$x_axis))
+    }
+)
+
+
+```
+Meteorological Data
+=====================================
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+# Define inputs
+selectizeInput('met_site', label = 'Select an Met site', choices = sitecodes, multiple = TRUE, options = list(maxItems = 5), selected = "643", )
+selectInput('weather_variable', label = 'Select a variable of interest', choices = weather_variables, selected = "wind_speed")
+selectInput('aggregation', label = 'Select level of aggregation', choices = aggregation, selected = "Raw hourly")
+selectInput('x_axis',label = 'Select X-axis', choices = x_axis, selected = 'date')
+selectInput('hutton_month',label = 'Select a month to report Hutton Criteria', choices = month, selected = 'Jan')
+
+## create download CSV and download report buttons
+p(class = 'text-center', downloadButton('downloadCSVButton', 'Download Summary Table'))
+p(class = 'text-center', downloadButton('downloadReportButton', 'Download Report'))
+
+```
+Use the dropdown menu to select a Met site to see the output. 
+
+
+
+Row
+-----------------------------------------------------------------------
+### Met Measurements 
+
+```{r}
+# Here, we draw the graph with ggplot
+output$graph <- renderPlot({
+
+  ## create plot dependent of x-axis selection - if calendar date then line graph.
+  if(input$x_axis == "Calendar date"){
+    ggplot(sitedata()) + 
+    geom_line(alpha = 0.4, aes(date, !!as.name(input$weather_variable), color = sitedata()$Site_Name)) +   guides(color=guide_legend(title = "Met Site")) + ggtitle(paste0(input$weather_variable,"(",input$aggregation,")")) + theme(plot.title = element_text(face = "bold")) + xlab('Calendar Date')
+  }
+  ## create plot dependent of x-axis selection - if day or hourly then scatter graph.
+  else if(input$x_axis == "day of week"){
+    ggplot(sitedata()) + 
+    geom_point(alpha = 0.4, aes(dayofweek, !!as.name(input$weather_variable), color = sitedata()$Site_Name)) +   guides(color=guide_legend(title = "Met Site")) + ggtitle(paste0(input$weather_variable," ( ",input$aggregation," )")) + theme(plot.title = element_text(face = "bold")) + xlab('Day of Week')
+  }
+  
+  else if(input$x_axis == "hour of day"){
+    ggplot(sitedata()) + 
+    geom_point(alpha = 0.4, aes(hour, !!as.name(input$weather_variable), color = sitedata()$Site_Name)) +   guides(color=guide_legend(title = "Met Site")) + ggtitle(paste0(input$weather_variable," ( ",input$aggregation," )")) + theme(plot.title = element_text(face = "bold")) + xlab('Hour of Day')
+  }
+  
+    else if(input$x_axis == "hour of week"){
+    ggplot(sitedata()) + 
+    geom_point(alpha = 0.4, aes(weekhour, !!as.name(input$weather_variable), color = sitedata()$Site_Name)) +   guides(color=guide_legend(title = "Met Site")) + ggtitle(paste0(input$weather_variable," ( ",input$aggregation," )")) + theme(plot.title = element_text(face = "bold")) + xlab('Hour of Week')
+  }
+    
+})  
+plotOutput('graph', width = "80%")
+```
+
+Row {.tabset}
+-----------------------------------------------------------------------
+
+### Summary Table
+
+```{r}
+
+## create reactable summary table using the reactable library. 
+
+output$summaryTable <- renderReactable({
+  
+  ## function to create a bar chart within the reactable table.
+  bar_chart <- function(label, width = "100%", height = "16px", fill = "#00bfc4", background = NULL) {
+  bar <- div(style = list(background = fill, width = width, height = height))
+  chart <- div(style = list(flexGrow = 1, marginLeft = "8px", background = background), bar)
+  div(style = list(display = "flex", alignItems = "center"), label, chart)
+  }
+
+  ## create reactable table
+  dt <- reactable(
+  summarydata(),
+  columns = list(
+    ## define wind_speed column in the table
+    wind_speed = colDef(
+      name = "Wind Speed",
+      cell = function(value) {
+        width <- paste0(value * 100 / max(summarydata()$wind_speed), "%")
+        value <- format(value, big.mark = ",")
+        # Fix each label using the width of the widest number
+        value <- format(value, width = 9, justify = "right")
+        bar_chart(value, width = width, fill = "#3fc1c9",background = "#e1e1e1")
+      },
+      align = "left",
+      # Use the operating system's default monospace font, and
+      # preserve white space to prevent it from being collapsed by default
+      style = list(fontFamily = "monospace", whiteSpace = "pre")
+    ),
+    air_temperature = colDef(
+      name = "Air Temp",
+      cell = function(value) {
+        width <- paste0(value * 100 / max(summarydata()$air_temperature), "%")
+        value <- format(value, big.mark = ",")
+        # Fix width here to align bars
+        value <- format(value, width = 9, justify = "right")
+        bar_chart(value, width = width, fill = "#fc5185", background = "#e1e1e1")
+      },
+      align = "left",
+      style = list(fontFamily = "monospace", whiteSpace = "pre")
+    ),
+        rltv_hum = colDef(
+      name = "RH %",
+      cell = function(value) {
+        width <- paste0(value * 100 / max(summarydata()$rltv_hum), "%")
+        value <- format(value, big.mark = ",")
+        # Fix width here to align bars
+        value <- format(value, width = 9, justify = "right")
+        bar_chart(value, width = width, fill = "#310af5", background = "#e1e1e1")
+      },
+      align = "left",
+      style = list(fontFamily = "monospace", whiteSpace = "pre")
+    ), 
+        visibility = colDef(
+      name = "Visibility",
+      cell = function(value) {
+        width <- paste0(value * 100 / max(summarydata()$visibility), "%")
+        value <- format(value, big.mark = ",")
+        # Fix width here to align bars
+        value <- format(value, width = 9, justify = "right")
+        bar_chart(value, width = width, fill = "#039154", background = "#e1e1e1")
+      },
+      align = "left",
+      style = list(fontFamily = "monospace", whiteSpace = "pre")
+    )
+  )
+)
+
+  
+  dt
+  
+})
+
+reactableOutput('summaryTable')
+
+```
+
+### Map
+
+```{r}
+# Draw the map
+output$map <- renderLeaflet({
+  
+  ## create wind icon to give met set icons a better look
+    windIcon <- makeIcon(iconUrl = "https://www.pinclipart.com/picdir/middle/140-1405202_windy-weather-icon-wind-weather-symbols-clipart.png",
+                         iconWidth = 38, iconHeight = 38,iconAnchorX = 20, iconAnchorY = -3, popupAnchorX = 20, popupAnchorY = 50)
+  
+  ## create leaflet map based on uniquely selected sites from sitedata()
+  map <- leaflet(data=sitedata()) %>%
+      addProviderTiles('CartoDB.Positron') %>%
+      addMarkers(lat = ~unique(Latitude), lng = ~unique(Longitude), label = ~unique(Site_Name), icon = windIcon,popup = ~unique(Site_ID), popupOptions = popupOptions(closeButton = FALSE, closeOnClick = FALSE, keepInView = TRUE,), labelOptions = labelOptions(noHide = T, textsize = "10px", direction = "top")) %>% 
+    setView(lng = -3.187390, lat = 54.788202, zoom = 4, options = list())
+   
+  map
+    
+  })
+leafletOutput('map')
+```
+
+### Hutton Criteria Table
+```{r}
+
+output$huttonTable <- renderReactable({
+  
+  ## create reactable table to present the hutton criteria based on selected sites and month. 
+  ## reactable also colours the boolean hutton criteria values based on boolean variable.
+  rt <- reactable(hutton_data(), columns = list(hutton_criteria = colDef(style = function(value) {
+      color <- if (value == TRUE) {
+        "#008000"
+      } else if (value == FALSE) {
+        "#e00000"
+      }
+      
+      list(fontWeight = 600, color = color)
+    })))
+  
+  rt
+  
+})
+
+reactableOutput('huttonTable')
+
+
+
+
+```
+
+
+About
+============================================================================
+
+This application is in support of the University of Glasgow MDataGov - R Programming Project
+
+The application is built with the [Shiny](http://shiny.rstudio.com) framework for the [R programming language](https://www.r-project.org/). The application layout is produced with the [flexdashboard](http://rstudio.github.io/flexdashboard/index.html) package, and the maps and plots use  [Leaflet.js](http://leafletjs.com/), and [ggplot2](http://ggplot2.org/), all accessed through their corresponding R packages.  
+
